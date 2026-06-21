@@ -372,12 +372,20 @@ pub(crate) fn spawn_validated(
     std::fs::create_dir_all(game_dir)
         .map_err(|e| LaunchError::new(Stage::Launch, ErrorCode::GameDirError, e.to_string()))?;
 
-    let mut child = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())))
         .current_dir(game_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // On Windows, don't flash a console window for the child Java process
+    // (CREATE_NO_WINDOW). stdout/stderr stay piped, so logging still works.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| LaunchError::new(Stage::Launch, ErrorCode::SpawnFailed, e.to_string()))?;
 

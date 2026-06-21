@@ -125,7 +125,14 @@ fn detect_java() -> Vec<JavaInstall> {
 }
 
 fn java_version(java: &Path) -> Option<String> {
-    let out = Command::new(java).arg("-version").output().ok()?;
+    let mut cmd = Command::new(java);
+    cmd.arg("-version");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().ok()?;
     let text = String::from_utf8_lossy(&out.stderr);
     let first = text.lines().next()?;
 
