@@ -1,4 +1,4 @@
-//! Server list: partner servers (fetched over HTTP, pinned on top)
+//! Server list: partner servers (remotely managed, fetched over HTTP, pinned on top)
 //! + the user's own servers, written into Minecraft's `servers.dat` so they show
 //! up in-game. The launcher only ever fetches HTTP/JSON, never a database.
 
@@ -158,17 +158,29 @@ struct McStatusMotd { #[serde(default)] clean: String }
 #[derive(Deserialize)]
 struct McStatusVersion { #[serde(default)] name_clean: Option<String> }
 
-/// Pings a server via the public mcstatus.io API (handles SRV + the SLP protocol
-/// + favicon for us). Best-effort: returns `online:false` on any failure.
+/// Pings a server's live status. Robust by design:
+///   1. A **direct TCP Server-List-Ping** to `host:port` (ground truth, no
+///      third-party rate limits) — this is what makes Hypixel & co. report online
+///      reliably.
+///   2. Falls back to the **mcstatus.io** API only if the direct ping fails (e.g.
+///      SRV-only domains that don't answer on the default port).
+/// Returns `online:false` only when BOTH fail.
 #[tauri::command]
 pub async fn ping_server(address: String) -> ServerStatus {
     let addr = address.trim();
     if addr.is_empty() {
         return ServerStatus::default();
     }
-    let client = match download::client() {
-        Ok(c) => c,
-        Err(_) => return ServerStatus::default(),
+
+    // 1. Direct SLP.
+    let (host, port) = parse_host_port(addr);
+    if let Some(v) = slp_status(&host, port).await {
+        return status_from_slp(&v);
+    }
+
+    // 2. Fallback: mcstatus.io (handles SRV records + favicon).
+    let Ok(client) = download::client() else {
+        return ServerStatus::default();
     };
     let url = format!("https://api.mcstatus.io/v2/status/java/{addr}");
     let resp = client.get(&url).timeout(Duration::from_secs(8)).send().await;
@@ -186,6 +198,137 @@ pub async fn ping_server(address: String) -> ServerStatus {
         },
         Err(_) => ServerStatus::default(),
     }
+}
+
+/// Splits `host` / `host:port`, defaulting to the Minecraft port 25565.
+fn parse_host_port(addr: &str) -> (String, u16) {
+    match addr.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() => (h.to_string(), p.trim().parse().unwrap_or(25565)),
+        _ => (addr.to_string(), 25565),
+    }
+}
+
+fn write_varint(buf: &mut Vec<u8>, value: i32) {
+    let mut val = value as u32;
+    loop {
+        let mut b = (val & 0x7F) as u8;
+        val >>= 7;
+        if val != 0 {
+            b |= 0x80;
+        }
+        buf.push(b);
+        if val == 0 {
+            break;
+        }
+    }
+}
+
+async fn read_varint<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> std::io::Result<i32> {
+    use tokio::io::AsyncReadExt;
+    let mut num: u32 = 0;
+    let mut shift = 0;
+    loop {
+        let b = r.read_u8().await?;
+        num |= ((b & 0x7F) as u32) << shift;
+        if b & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift >= 35 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "varint too long"));
+        }
+    }
+    Ok(num as i32)
+}
+
+/// Performs a modern (1.7+) Server-List-Ping handshake and returns the status JSON.
+async fn slp_status(host: &str, port: u16) -> Option<serde_json::Value> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let fut = async {
+        let mut stream = tokio::net::TcpStream::connect((host, port)).await.ok()?;
+
+        // Handshake packet (id 0x00): protocol -1, host, port, next-state 1 (status).
+        let mut hs = Vec::new();
+        write_varint(&mut hs, 0x00);
+        write_varint(&mut hs, -1);
+        write_varint(&mut hs, host.len() as i32);
+        hs.extend_from_slice(host.as_bytes());
+        hs.extend_from_slice(&port.to_be_bytes());
+        write_varint(&mut hs, 1);
+
+        let mut packet = Vec::new();
+        write_varint(&mut packet, hs.len() as i32);
+        packet.extend_from_slice(&hs);
+        // Status request (length 1, id 0x00).
+        write_varint(&mut packet, 1);
+        write_varint(&mut packet, 0x00);
+        stream.write_all(&packet).await.ok()?;
+
+        // Response: [packet length][packet id][json length][json].
+        let _packet_len = read_varint(&mut stream).await.ok()?;
+        let _packet_id = read_varint(&mut stream).await.ok()?;
+        let json_len = read_varint(&mut stream).await.ok()?;
+        if json_len <= 0 || json_len > 2_000_000 {
+            return None;
+        }
+        let mut buf = vec![0u8; json_len as usize];
+        stream.read_exact(&mut buf).await.ok()?;
+        serde_json::from_slice::<serde_json::Value>(&buf).ok()
+    };
+    tokio::time::timeout(Duration::from_secs(5), fut).await.ok().flatten()
+}
+
+/// Builds a [`ServerStatus`] from a raw SLP status JSON. A response at all means
+/// the server is online.
+fn status_from_slp(v: &serde_json::Value) -> ServerStatus {
+    let players = v.get("players");
+    ServerStatus {
+        online: true,
+        players: players.and_then(|p| p.get("online")).and_then(|n| n.as_i64()).unwrap_or(0),
+        max: players.and_then(|p| p.get("max")).and_then(|n| n.as_i64()).unwrap_or(0),
+        icon: v.get("favicon").and_then(|f| f.as_str()).map(|s| s.to_string()),
+        motd: strip_legacy(&flatten_desc(v.get("description").unwrap_or(&serde_json::Value::Null))),
+        version: v
+            .get("version")
+            .and_then(|ver| ver.get("name"))
+            .and_then(|n| n.as_str())
+            .map(|s| strip_legacy(s)),
+    }
+}
+
+/// Flattens a chat-component MOTD (string, or {text, extra:[…]}) into plain text.
+fn flatten_desc(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(o) => {
+            let mut s = String::new();
+            if let Some(t) = o.get("text").and_then(|t| t.as_str()) {
+                s.push_str(t);
+            }
+            if let Some(extra) = o.get("extra").and_then(|e| e.as_array()) {
+                for e in extra {
+                    s.push_str(&flatten_desc(e));
+                }
+            }
+            s
+        }
+        serde_json::Value::Array(arr) => arr.iter().map(flatten_desc).collect(),
+        _ => String::new(),
+    }
+}
+
+/// Strips legacy `§x` colour/format codes.
+fn strip_legacy(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '§' {
+            chars.next();
+        } else {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
 }
 
 /// servers.dat wants the raw base64 PNG (no `data:image/png;base64,` prefix).

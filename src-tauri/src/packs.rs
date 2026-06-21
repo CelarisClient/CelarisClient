@@ -515,6 +515,8 @@ pub async fn install_server_modpack(app: AppHandle, slug: String) -> Result<Prof
             m.project_id.clone(),
             mc_version.clone(),
             profile.name.clone(),
+            None,
+            None,
         )
         .await;
     }

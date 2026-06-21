@@ -314,13 +314,18 @@ body {
 
 .sidebar {
   grid-area: sidebar;
-  background: linear-gradient(180deg, rgba(9, 11, 17, 0.72), rgba(9, 11, 17, 0.5));
+  /* Near-opaque background so the sidebar stays visible even if WebKitGTK fails
+     to repaint the backdrop blur; the blur is a progressive enhancement. */
+  background: linear-gradient(180deg, rgba(9, 11, 17, 0.94), rgba(9, 11, 17, 0.9));
   backdrop-filter: blur(14px);
   border-right: 1px solid var(--border-soft);
   display: flex;
   flex-direction: column;
   padding: var(--s5) var(--s4);
   gap: var(--s2);
+  /* Own compositing layer → forces reliable repaints on WebKitGTK. */
+  transform: translateZ(0);
+  will-change: transform;
 }
 
 .topbar {
@@ -331,14 +336,33 @@ body {
   justify-content: flex-end;
   gap: var(--s3);
   padding: 0 var(--s5);
-  background: rgba(12, 15, 23, 0.5);
+  background: rgba(12, 15, 23, 0.88);
   backdrop-filter: blur(8px);
+  transform: translateZ(0);
 }
+
+/* "Update available" pill in the top bar (works for all install formats). */
+.update-pill {
+  margin-right: auto; /* push to the left edge of the top bar */
+  border: 1px solid var(--accent);
+  background: var(--accent-soft, rgba(157, 92, 255, 0.15));
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+.update-pill:hover { background: var(--accent); transform: translateY(-1px); }
 
 .main {
   grid-area: main;
   overflow-y: auto;
   padding: var(--s6) var(--s7);
+  /* Own compositing layer → avoids WebKitGTK leaving stale/half-painted content
+     until a panel switch forces a repaint. */
+  transform: translateZ(0);
 }
 
 /* ============================================================================
@@ -1370,12 +1394,14 @@ body {
 .mod-row:hover { border-color: var(--border); transform: translateX(3px); }
 .mod-icon {
   width: 42px; height: 42px;
+  flex: 0 0 42px;
   border-radius: 10px;
   background: var(--surface-3);
   display: grid; place-items: center;
   font-family: var(--font-display);
   font-weight: 700;
   color: var(--accent);
+  object-fit: cover; /* when it's an <img> mod/pack icon */
 }
 .mod-info { flex: 1; }
 .mod-name { font-weight: 600; }
@@ -1523,8 +1549,14 @@ input[type="range"] {
   50% { box-shadow: 0 0 0 9px rgba(157, 92, 255, 0.06); }
 }
 
-/* Staggered reveal helper */
-.stagger > * { animation: reveal 0.5s ease both; }
+/* Staggered reveal helper. Transform-only (no opacity) so content is ALWAYS
+   visible even if WebKitGTK skips/doesn't repaint the animation — otherwise items
+   could stay at opacity:0 until the panel is re-mounted. */
+@keyframes reveal-up {
+  from { transform: translateY(10px); }
+  to { transform: translateY(0); }
+}
+.stagger > * { animation: reveal-up 0.4s ease both; }
 .stagger > *:nth-child(1) { animation-delay: 0.04s; }
 .stagger > *:nth-child(2) { animation-delay: 0.10s; }
 .stagger > *:nth-child(3) { animation-delay: 0.16s; }

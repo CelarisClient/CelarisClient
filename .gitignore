@@ -31,5 +31,13 @@ src-tauri/target/
 .env.*
 *.env
 
+# --- Special Admin build (NEVER commit/push) ---
+# Real Admin tab UI + the Rust admin bridge. Player builds use the stub instead.
+src/admin/AdminPanel.real.tsx
+src-tauri/src/admin.rs
+# Local admin token (also stored at runtime in app_config_dir/admin.json)
+admin.json
 
 # Local agent/instructions notes (kept local)
+AGENTS.md
+CLAUDE.md

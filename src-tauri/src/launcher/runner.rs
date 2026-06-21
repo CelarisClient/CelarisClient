@@ -226,6 +226,17 @@ fn inject_stage(
     if !config.mods.is_empty() {
         std::fs::create_dir_all(&mods_dir)
             .map_err(|e| LaunchError::new(Stage::Inject, ErrorCode::ModMissing, e.to_string()))?;
+        // Remove stale Celaris client jars from previous versions so only the
+        // current one is loaded — otherwise Fabric loads several at once and an
+        // outdated jar (with old mixins) crashes the game.
+        if let Ok(entries) = std::fs::read_dir(&mods_dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("Celaris-") && name.ends_with(".jar") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         for jar in &config.mods {
             let file_name = jar.file_name().ok_or_else(|| {
                 LaunchError::new(Stage::Inject, ErrorCode::ModMissing, format!("invalid mod path: {}", jar.display()))
@@ -373,23 +384,41 @@ pub(crate) fn spawn_validated(
     std::thread::sleep(STARTUP_GRACE);
     if let Ok(Some(status)) = child.try_wait() {
         if !status.success() {
-            return Err(LaunchError::new(
-                Stage::Launch,
-                ErrorCode::ProcessExitedEarly,
-                format!("process exited during startup: {status}"),
-            ));
+            // The process died immediately — capture whatever it printed so the
+            // real cause (Java error, missing class, incompatible version, …) is
+            // shown instead of just an exit code.
+            use std::io::Read;
+            let mut out = String::new();
+            if let Some(mut so) = child.stdout.take() {
+                let _ = so.read_to_string(&mut out);
+            }
+            if let Some(mut se) = child.stderr.take() {
+                let _ = se.read_to_string(&mut out);
+            }
+            let out = out.trim();
+            let tail = if out.len() > 2000 { &out[out.len() - 2000..] } else { out };
+            let detail = if tail.is_empty() {
+                format!("process exited during startup: {status} (keine Ausgabe — evtl. falsche Java-Version)")
+            } else {
+                format!("process exited during startup: {status}\n{tail}")
+            };
+            return Err(LaunchError::new(Stage::Launch, ErrorCode::ProcessExitedEarly, detail));
         }
     }
     Ok(child)
 }
 
 fn build_command(config: &CelarisLaunchConfig, plan: &LaunchPlan) -> Vec<String> {
+    // Classpath entries are separated by ';' on Windows and ':' elsewhere. Using
+    // ':' on Windows mangled the whole classpath (drive letters contain ':'), so
+    // the JVM found neither Main nor KnotClient → "ClassNotFoundException".
+    let cp_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
     let cp = plan
         .classpath
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect::<Vec<_>>()
-        .join(":");
+        .join(cp_sep);
 
     let replacements: Vec<(&str, String)> = vec![
         ("${auth_player_name}", config.session.username.clone()),

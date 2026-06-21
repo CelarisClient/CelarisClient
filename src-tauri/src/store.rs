@@ -159,6 +159,10 @@ pub async fn search_mods(query: String, mc_version: String, offset: Option<u32>,
 
 #[derive(Deserialize)]
 struct Version {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    version_number: String,
     files: Vec<VersionFile>,
     #[serde(default)]
     loaders: Vec<String>,
@@ -192,20 +196,11 @@ fn pick_file(v: &Version) -> Option<VersionFile> {
         .cloned()
 }
 
-#[tauri::command]
-pub async fn install_mod(
-    app: AppHandle,
-    project_id: String,
-    mc_version: String,
-    profile: String,
-) -> Result<String, String> {
-    let client = download::client().map_err(|e| e.to_string())?;
-
-    // Fetch ALL versions (no server-side filter) and rank locally. The previous
-    // strict loaders+game_versions query returned empty for many mods (e.g. ones
-    // tagged only for a nearby MC patch, or whose loader list omits "fabric"),
-    // which is why "some mods couldn't be downloaded". Ranking guarantees we pick
-    // the best available file instead of failing.
+/// Fetches a project's versions and picks the best one for `mc_version`: an exact
+/// MC match (+2) and the fabric loader (+1) rank highest, then newest. Returns the
+/// chosen version (which always has a downloadable file). Shared by install,
+/// update and update-check so they agree on "latest".
+async fn pick_best_mod(client: &reqwest::Client, project_id: &str, mc_version: &str) -> Result<Version, String> {
     let versions: Vec<Version> = client
         .get(format!("{MODRINTH}/project/{project_id}/version"))
         .send()
@@ -216,27 +211,45 @@ pub async fn install_mod(
         .json()
         .await
         .map_err(|e| e.to_string())?;
-
     if versions.is_empty() {
         return Err("Diese Mod hat keine veröffentlichten Versionen".to_string());
     }
-    // Score: exact MC version match (+2) and fabric loader (+1) are best, then
-    // fall back to the newest version that has any downloadable file.
-    let best = versions
-        .iter()
+    versions
+        .into_iter()
         .filter(|v| pick_file(v).is_some())
         .max_by_key(|v| {
-            let ver = if v.game_versions.iter().any(|g| g == &mc_version) { 2 } else { 0 };
+            let ver = if v.game_versions.iter().any(|g| g == mc_version) { 2 } else { 0 };
             let loader = if v.loaders.iter().any(|l| l == "fabric") { 1 } else { 0 };
             (ver + loader, v.date_published.clone())
         })
-        .ok_or("Keine herunterladbare Datei für diese Mod gefunden")?;
-    let file = pick_file(best).unwrap();
+        .ok_or_else(|| "Keine herunterladbare Datei für diese Mod gefunden".to_string())
+}
 
-    let dest = usermods_dir(&app, &profile)?.join(&file.filename);
+#[tauri::command]
+pub async fn install_mod(
+    app: AppHandle,
+    project_id: String,
+    mc_version: String,
+    profile: String,
+    title: Option<String>,
+    icon_url: Option<String>,
+) -> Result<String, String> {
+    let client = download::client().map_err(|e| e.to_string())?;
+    let best = pick_best_mod(&client, &project_id, &mc_version).await?;
+    let version_id = best.id.clone();
+    let file = pick_file(&best).unwrap();
+
+    let dir = usermods_dir(&app, &profile)?;
+    let dest = dir.join(&file.filename);
     download::download_file(&client, &file.url, &dest, None)
         .await
         .map_err(|e| e.to_string())?;
+    record_meta(&dir, &file.filename, Meta {
+        project_id: project_id.clone(),
+        title: title.unwrap_or_default(),
+        icon_url: icon_url.unwrap_or_default(),
+        version_id,
+    });
     Ok(file.filename)
 }
 
@@ -248,11 +261,85 @@ pub async fn install_mod(
 pub struct InstalledMod {
     pub id: String,
     pub filename: String,
+    /// Modrinth project id this file was installed from (empty if unknown, e.g.
+    /// manually dropped in). Lets the marketplace reliably mark items "Installed"
+    /// even when the file's internal id differs from the Modrinth slug/id.
+    #[serde(default)]
+    pub project_id: String,
+    /// Human title + icon recorded at install time (for the Installed screen).
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub icon_url: String,
+    /// Installed Modrinth version id — compared against the latest to offer updates.
+    #[serde(default)]
+    pub version_id: String,
+}
+
+// --- installed manifest (filename -> install metadata) -----------------------
+// A tiny `.celaris-ids.json` per content folder records which Modrinth project
+// each downloaded file came from (+ title/icon/version) so "Installed" detection
+// is exact, the Installed screen can show names/icons, and updates can be offered.
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct Meta {
+    project_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    icon_url: String,
+    #[serde(default)]
+    version_id: String,
+}
+
+fn ids_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join(".celaris-ids.json")
+}
+
+fn read_manifest(dir: &std::path::Path) -> std::collections::HashMap<String, Meta> {
+    let Ok(s) = std::fs::read_to_string(ids_path(dir)) else {
+        return std::collections::HashMap::new();
+    };
+    // Current rich format.
+    if let Ok(m) = serde_json::from_str::<std::collections::HashMap<String, Meta>>(&s) {
+        return m;
+    }
+    // Legacy {filename: "project_id"} format → migrate in memory.
+    if let Ok(old) = serde_json::from_str::<std::collections::HashMap<String, String>>(&s) {
+        return old
+            .into_iter()
+            .map(|(k, v)| (k, Meta { project_id: v, ..Default::default() }))
+            .collect();
+    }
+    std::collections::HashMap::new()
+}
+
+fn write_manifest(dir: &std::path::Path, m: &std::collections::HashMap<String, Meta>) {
+    if let Ok(s) = serde_json::to_string(m) {
+        let _ = std::fs::write(ids_path(dir), s);
+    }
+}
+
+fn record_meta(dir: &std::path::Path, filename: &str, meta: Meta) {
+    if meta.project_id.is_empty() {
+        return;
+    }
+    let mut m = read_manifest(dir);
+    m.insert(filename.to_string(), meta);
+    write_manifest(dir, &m);
+}
+
+fn forget_id(dir: &std::path::Path, filename: &str) {
+    let mut m = read_manifest(dir);
+    if m.remove(filename).is_some() {
+        write_manifest(dir, &m);
+    }
 }
 
 #[tauri::command]
 pub fn list_installed_mods(app: AppHandle, profile: String) -> Result<Vec<InstalledMod>, String> {
     let dir = usermods_dir(&app, &profile)?;
+    let manifest = read_manifest(&dir);
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -260,7 +347,15 @@ pub fn list_installed_mods(app: AppHandle, profile: String) -> Result<Vec<Instal
             if path.extension().map(|e| e == "jar").unwrap_or(false) {
                 let filename = path.file_name().unwrap().to_string_lossy().to_string();
                 let id = mods::read_fabric_mod_id(&path).unwrap_or_else(|| filename.clone());
-                out.push(InstalledMod { id, filename });
+                let meta = manifest.get(&filename).cloned().unwrap_or_default();
+                out.push(InstalledMod {
+                    id,
+                    filename,
+                    project_id: meta.project_id,
+                    title: meta.title,
+                    icon_url: meta.icon_url,
+                    version_id: meta.version_id,
+                });
             }
         }
     }
@@ -276,7 +371,55 @@ pub fn remove_mod(app: AppHandle, filename: String, profile: String) -> Result<(
     if path.parent() != Some(dir.as_path()) {
         return Err("ungültiger Pfad".to_string());
     }
-    std::fs::remove_file(path).map_err(|e| e.to_string())
+    std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    forget_id(&dir, &filename);
+    Ok(())
+}
+
+/// Returns the filenames of installed mods that have a newer version available.
+/// On-demand (one Modrinth request per mod), so call it when the Installed tab is
+/// opened rather than continuously. Mods are never auto-updated — the user picks.
+#[tauri::command]
+pub async fn check_mod_updates(app: AppHandle, profile: String, mc_version: String) -> Result<Vec<String>, String> {
+    let dir = usermods_dir(&app, &profile)?;
+    let manifest = read_manifest(&dir);
+    let client = download::client().map_err(|e| e.to_string())?;
+    let mut updatable = Vec::new();
+    for (filename, meta) in manifest {
+        if meta.project_id.is_empty() || meta.version_id.is_empty() || !dir.join(&filename).exists() {
+            continue;
+        }
+        if let Ok(best) = pick_best_mod(&client, &meta.project_id, &mc_version).await {
+            if !best.id.is_empty() && best.id != meta.version_id {
+                updatable.push(filename);
+            }
+        }
+    }
+    Ok(updatable)
+}
+
+/// Updates a single installed mod to the latest version: downloads the new file,
+/// removes the old one and keeps the recorded title/icon.
+#[tauri::command]
+pub async fn update_mod(
+    app: AppHandle,
+    profile: String,
+    mc_version: String,
+    filename: String,
+) -> Result<String, String> {
+    let dir = usermods_dir(&app, &profile)?;
+    let meta = read_manifest(&dir).get(&filename).cloned().ok_or("Mod nicht im Manifest")?;
+    if meta.project_id.is_empty() {
+        return Err("Keine Modrinth-Zuordnung für diese Mod".to_string());
+    }
+    let title = if meta.title.is_empty() { None } else { Some(meta.title.clone()) };
+    let icon = if meta.icon_url.is_empty() { None } else { Some(meta.icon_url.clone()) };
+    let new_file = install_mod(app.clone(), meta.project_id, mc_version, profile, title, icon).await?;
+    if new_file != filename {
+        let _ = std::fs::remove_file(dir.join(&filename));
+        forget_id(&dir, &filename);
+    }
+    Ok(new_file)
 }
 
 // ===========================================================================
@@ -336,6 +479,7 @@ async fn search_content(query: String, mc_version: String, project_type: &str, s
 
 /// Downloads a project's newest matching file into a profile content folder.
 /// `loaders` is an optional Modrinth loader filter (shaders use iris/optifine).
+#[allow(clippy::too_many_arguments)]
 async fn install_content(
     app: &AppHandle,
     project_id: &str,
@@ -343,6 +487,8 @@ async fn install_content(
     profile: &str,
     sub: &str,
     loaders: Option<&str>,
+    title: Option<String>,
+    icon_url: Option<String>,
 ) -> Result<String, String> {
     let client = download::client().map_err(|e| e.to_string())?;
     let mut q: Vec<(&str, String)> = vec![("game_versions", format!("[\"{mc_version}\"]"))];
@@ -368,16 +514,25 @@ async fn install_content(
             (ver, v.date_published.clone())
         })
         .ok_or_else(|| format!("Keine mit {mc_version} kompatible Version gefunden"))?;
+    let version_id = best.id.clone();
     let file = pick_file(best).ok_or("Version hat keine Hauptdatei")?;
-    let dest = instance_content_dir(app, profile, sub)?.join(&file.filename);
+    let dir = instance_content_dir(app, profile, sub)?;
+    let dest = dir.join(&file.filename);
     download::download_file(&client, &file.url, &dest, None)
         .await
         .map_err(|e| e.to_string())?;
+    record_meta(&dir, &file.filename, Meta {
+        project_id: project_id.to_string(),
+        title: title.unwrap_or_default(),
+        icon_url: icon_url.unwrap_or_default(),
+        version_id,
+    });
     Ok(file.filename)
 }
 
 fn list_content(app: &AppHandle, profile: &str, sub: &str, exts: &[&str]) -> Result<Vec<InstalledMod>, String> {
     let dir = instance_content_dir(app, profile, sub)?;
+    let manifest = read_manifest(&dir);
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -389,7 +544,15 @@ fn list_content(app: &AppHandle, profile: &str, sub: &str, exts: &[&str]) -> Res
                 .unwrap_or(false);
             if ok {
                 let filename = path.file_name().unwrap().to_string_lossy().to_string();
-                out.push(InstalledMod { id: filename.clone(), filename });
+                let meta = manifest.get(&filename).cloned().unwrap_or_default();
+                out.push(InstalledMod {
+                    id: filename.clone(),
+                    filename,
+                    project_id: meta.project_id,
+                    title: meta.title,
+                    icon_url: meta.icon_url,
+                    version_id: meta.version_id,
+                });
             }
         }
     }
@@ -403,7 +566,9 @@ fn remove_content(app: &AppHandle, profile: &str, sub: &str, filename: &str) -> 
     if path.parent() != Some(dir.as_path()) {
         return Err("ungültiger Pfad".to_string());
     }
-    std::fs::remove_file(path).map_err(|e| e.to_string())
+    std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    forget_id(&dir, filename);
+    Ok(())
 }
 
 // --- ResourcePacks ---
@@ -414,8 +579,8 @@ pub async fn search_resourcepacks(query: String, mc_version: String, sort: Optio
 }
 
 #[tauri::command]
-pub async fn install_resourcepack(app: AppHandle, project_id: String, mc_version: String, profile: String) -> Result<String, String> {
-    install_content(&app, &project_id, &mc_version, &profile, "resourcepacks", None).await
+pub async fn install_resourcepack(app: AppHandle, project_id: String, mc_version: String, profile: String, title: Option<String>, icon_url: Option<String>) -> Result<String, String> {
+    install_content(&app, &project_id, &mc_version, &profile, "resourcepacks", None, title, icon_url).await
 }
 
 #[tauri::command]
@@ -436,8 +601,8 @@ pub async fn search_shaders(query: String, mc_version: String, sort: Option<Stri
 }
 
 #[tauri::command]
-pub async fn install_shader(app: AppHandle, project_id: String, mc_version: String, profile: String) -> Result<String, String> {
-    install_content(&app, &project_id, &mc_version, &profile, "shaderpacks", Some("[\"iris\",\"optifine\"]")).await
+pub async fn install_shader(app: AppHandle, project_id: String, mc_version: String, profile: String, title: Option<String>, icon_url: Option<String>) -> Result<String, String> {
+    install_content(&app, &project_id, &mc_version, &profile, "shaderpacks", Some("[\"iris\",\"optifine\"]"), title, icon_url).await
 }
 
 #[tauri::command]

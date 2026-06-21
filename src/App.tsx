@@ -64,7 +64,7 @@ type ModHit = {
   downloads: number;
   icon_url: string | null;
 };
-type InstalledMod = { id: string; filename: string };
+type InstalledMod = { id: string; filename: string; project_id?: string; title?: string; icon_url?: string; version_id?: string };
 type McVersion = { id: string; kind: string; release_time: string };
 type SkinInfo = { id: string; name: string; uuid: string; png_base64: string };
 type ServerEntry = {
@@ -255,6 +255,8 @@ export default function App() {
   const [modsTab, setModsTab] = useState<"browse" | "installed">("browse");
   const [modQuery, setModQuery] = useState("");
   const [modResults, setModResults] = useState<ModHit[]>([]);
+  const [modUpdates, setModUpdates] = useState<Set<string>>(new Set());
+  const [updatingMod, setUpdatingMod] = useState<string | null>(null);
   const [modPage, setModPage] = useState(0);
   const [modSort, setModSort] = useState("relevance");
   const [searching, setSearching] = useState(false);
@@ -274,6 +276,13 @@ export default function App() {
   const [hasShaderLoader, setHasShaderLoader] = useState(false);
 
   const [versions, setVersions] = useState<McVersion[]>([]);
+  const [appVersions, setAppVersions] = useState<{
+    launcher: string;
+    launcher_latest: string;
+    update_available: boolean;
+    update_url: string;
+    client: string;
+  }>({ launcher: "", launcher_latest: "", update_available: false, update_url: "", client: "" });
   const [showSnapshots, setShowSnapshots] = useState(false);
 
   const [skins, setSkins] = useState<SkinInfo[]>([]);
@@ -944,6 +953,32 @@ export default function App() {
     }
   }
 
+  // Check (on demand) which installed mods have a newer version — never auto-update.
+  async function checkModUpdates() {
+    try {
+      const upd = await invoke<string[]>("check_mod_updates", {
+        profile: modProf.name,
+        mcVersion: modProf.minecraft_version,
+      });
+      setModUpdates(new Set(upd));
+    } catch {
+      setModUpdates(new Set());
+    }
+  }
+
+  async function updateMod(filename: string) {
+    setUpdatingMod(filename);
+    try {
+      await invoke("update_mod", { profile: modProf.name, mcVersion: modProf.minecraft_version, filename });
+      await loadInstalled();
+      await checkModUpdates();
+    } catch (e) {
+      setLogs((l) => [...l, `Update fehlgeschlagen: ${String(e)}`]);
+    } finally {
+      setUpdatingMod(null);
+    }
+  }
+
   async function searchMods(page = 0) {
     setSearching(true);
     try {
@@ -970,6 +1005,8 @@ export default function App() {
         projectId: hit.project_id,
         mcVersion: modProf.minecraft_version,
         profile: modProf.name,
+        title: hit.title,
+        iconUrl: hit.icon_url,
       });
       await loadInstalled();
     } catch (e) {
@@ -1024,7 +1061,7 @@ export default function App() {
   async function installPack(hit: ModHit) {
     setPackInstalling(hit.project_id);
     try {
-      await invoke(packCmds(packKind).install, { projectId: hit.project_id, mcVersion: modProf.minecraft_version, profile: modProf.name });
+      await invoke(packCmds(packKind).install, { projectId: hit.project_id, mcVersion: modProf.minecraft_version, profile: modProf.name, title: hit.title, iconUrl: hit.icon_url });
       await loadPackInstalled();
     } catch (e) {
       setLogs((l) => [...l, `Installation fehlgeschlagen: ${String(e)}`]);
@@ -1070,6 +1107,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
+  // When the "Installed" mods tab opens, check for available updates (on demand).
+  useEffect(() => {
+    if (view === "mods" && modsTab === "installed") checkModUpdates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, modsTab, active]);
+
   useEffect(() => {
     if (launchState === "launched") playStartRef.current = Date.now();
     reportPresence();
@@ -1090,10 +1133,15 @@ export default function App() {
 
   useEffect(() => {
     loadVersions();
+    invoke<typeof appVersions>("version_info")
+      .then(setAppVersions)
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const installedIds = new Set(installed.map((m) => m.id));
+  // Match installed mods by the Modrinth project id recorded at install time
+  // (exact), falling back to the internal id for manually-added jars.
+  const installedIds = new Set(installed.flatMap((m) => [m.project_id, m.id].filter(Boolean) as string[]));
   const visibleVersions = versions.filter((v) => showSnapshots || v.kind === "release");
 
   return (
@@ -1157,11 +1205,23 @@ export default function App() {
         <SidebarItem icon={<CreditsIcon />} label="Credits" active={view === "credits"} onClick={() => setView("credits")} />
 
         <div className="sidebar-spacer" />
-        <div className="sidebar-foot">Celaris v0.1 · Fabric</div>
+        <div className="sidebar-foot">
+          <div>Launcher {appVersions.launcher || "…"}</div>
+          <div>Client {appVersions.client || "…"}</div>
+        </div>
       </aside>
 
       {/* ----- Top bar ----- */}
       <header className="topbar">
+        {appVersions.update_available && (
+          <button
+            className="update-pill"
+            title="Launcher-Update herunterladen"
+            onClick={() => invoke("open_external", { url: appVersions.update_url }).catch(() => {})}
+          >
+            ↑ Update verfügbar: {appVersions.launcher_latest} — Download
+          </button>
+        )}
         <span className="chip">
           <span className="chip-key">Ver</span>
           <strong>{profile.minecraft_version}</strong>
@@ -1504,7 +1564,7 @@ export default function App() {
                       if (confirm(`Profil „${p.name}" wirklich löschen?`)) deleteProfile(i);
                     }}
                   >
-                    🗑 Löschen
+                    Löschen
                   </Button>
                 )}
                 {i === active && (
@@ -1641,16 +1701,29 @@ export default function App() {
           </Card>
         ) : (
           <div className="grid stagger" style={{ gap: "var(--s3)" }}>
-            {installed.map((m) => (
-              <div key={m.filename} className="mod-row">
-                <div className="mod-icon">{m.id.charAt(0).toUpperCase()}</div>
-                <div className="mod-info">
-                  <div className="mod-name">{m.id}</div>
-                  <div className="mod-meta">{m.filename}</div>
+            {installed.map((m) => {
+              const name = m.title || m.id;
+              const canUpdate = modUpdates.has(m.filename);
+              return (
+                <div key={m.filename} className="mod-row">
+                  {m.icon_url ? (
+                    <img className="mod-icon" src={m.icon_url} alt="" />
+                  ) : (
+                    <div className="mod-icon">{name.charAt(0).toUpperCase()}</div>
+                  )}
+                  <div className="mod-info">
+                    <div className="mod-name">{name}</div>
+                    <div className="mod-meta">{m.filename}</div>
+                  </div>
+                  {canUpdate && (
+                    <PrimaryButton disabled={updatingMod === m.filename} onClick={() => updateMod(m.filename)}>
+                      {updatingMod === m.filename ? "Aktualisiert…" : "↑ Update"}
+                    </PrimaryButton>
+                  )}
+                  <Button className="btn--ghost" onClick={() => removeMod(m.filename)}>Entfernen</Button>
                 </div>
-                <Button className="btn--ghost" onClick={() => removeMod(m.filename)}>Entfernen</Button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -1932,7 +2005,9 @@ export default function App() {
     const isShader = packKind === "shader";
     const title = isShader ? "Shader" : "Texturpakete";
     const sub = isShader ? "Modrinth · Iris/OptiFine" : "Modrinth · Ressourcenpakete";
-    const installedIds2 = new Set(packInstalled.map((m) => m.id.toLowerCase()));
+    const installedIds2 = new Set(
+      packInstalled.flatMap((m) => [m.project_id, m.id].filter(Boolean) as string[]).map((s) => s.toLowerCase())
+    );
     if (isShader && !hasShaderLoader) {
       return (
         <div className="view">
@@ -2006,7 +2081,7 @@ export default function App() {
             ) : (
               <div className="grid grid--cards stagger">
                 {packResults.map((m) => {
-                  const isInst = installedIds2.has(m.slug.toLowerCase());
+                  const isInst = installedIds2.has(m.project_id.toLowerCase()) || installedIds2.has(m.slug.toLowerCase());
                   return (
                     <Card key={m.project_id} className="modcard">
                       <div className="modcard-head">
@@ -2040,16 +2115,23 @@ export default function App() {
           </Card>
         ) : (
           <div className="grid stagger" style={{ gap: "var(--s3)" }}>
-            {packInstalled.map((m) => (
-              <div key={m.filename} className="mod-row">
-                <div className="mod-icon">{m.id.charAt(0).toUpperCase()}</div>
-                <div className="mod-info">
-                  <div className="mod-name">{m.id}</div>
-                  <div className="mod-meta">{m.filename}</div>
+            {packInstalled.map((m) => {
+              const name = m.title || m.id;
+              return (
+                <div key={m.filename} className="mod-row">
+                  {m.icon_url ? (
+                    <img className="mod-icon" src={m.icon_url} alt="" />
+                  ) : (
+                    <div className="mod-icon">{name.charAt(0).toUpperCase()}</div>
+                  )}
+                  <div className="mod-info">
+                    <div className="mod-name">{name}</div>
+                    <div className="mod-meta">{m.filename}</div>
+                  </div>
+                  <Button className="btn--ghost" onClick={() => removePack(m.filename)}>Entfernen</Button>
                 </div>
-                <Button className="btn--ghost" onClick={() => removePack(m.filename)}>Entfernen</Button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

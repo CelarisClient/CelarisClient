@@ -9,7 +9,7 @@ mod skins;
 mod spotify;
 mod store;
 
-/// Base URL for remotely managed content (partner servers, global modpacks,
+/// Base URL for remotely managed remote content (partner servers, global modpacks,
 /// announcements). Served over HTTP as JSON — the launcher NEVER talks to a DB
 /// directly. Replace with your own hosting once available.
 pub(crate) const CONTENT_BASE: &str = "https://api.celarisclient.de/content";
@@ -331,6 +331,14 @@ fn required_java_major(mc: &str) -> u32 {
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse().ok())
         .collect();
+    let major = nums.first().copied().unwrap_or(1);
+    // Mojang's new year-based versioning (e.g. "26.1.2") replaced the old
+    // "1.MINOR.PATCH" scheme after 1.21.x. These newer releases need Java 25.
+    // Without this, "26.1.2" parsed as minor=1 and fell through to Java 8 → the
+    // game crashed instantly with no log.
+    if major != 1 {
+        return 25;
+    }
     let minor = nums.get(1).copied().unwrap_or(0);
     let patch = nums.get(2).copied().unwrap_or(0);
     if minor >= 21 {
@@ -560,6 +568,86 @@ async fn refresh_account(refresh_token: String) -> Result<auth::OnlineLogin, Str
         .map_err(|e| e.to_string())
 }
 
+/// ---------------- VERSIONS ----------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionInfo {
+    /// The launcher version actually running (baked in at build time).
+    pub launcher: String,
+    /// Name of the latest GitHub release (empty if unknown/offline).
+    pub launcher_latest: String,
+    /// Whether a newer launcher release than the running one exists.
+    pub update_available: bool,
+    /// GitHub release page to download the update from (for deb/rpm where the
+    /// built-in updater can't self-replace).
+    pub update_url: String,
+    /// In-game client version — from the backend's `celaris/version.json`.
+    pub client: String,
+}
+
+/// Normalises a version string for comparison ("v0.1.0" / " 0.1.0 " → "0.1.0").
+fn norm_ver(s: &str) -> String {
+    s.trim().trim_start_matches(['v', 'V']).trim().to_string()
+}
+
+/// Reports the launcher + in-game client versions (and whether a launcher update
+/// is available) for display in the UI.
+#[tauri::command]
+async fn version_info() -> VersionInfo {
+    let launcher = env!("CARGO_PKG_VERSION").to_string();
+    let mut launcher_latest = String::new();
+    let mut update_url = "https://github.com/CelarisClient/CelarisClient/releases/latest".to_string();
+    let mut client = "—".to_string();
+
+    if let Ok(http) = launcher::download::client() {
+        // Latest GitHub release.
+        if let Ok(resp) = http
+            .get("https://api.github.com/repos/CelarisClient/CelarisClient/releases/latest")
+            .header("User-Agent", "Celaris-Launcher")
+            .header("Accept", "application/vnd.github+json")
+            .timeout(std::time::Duration::from_secs(6))
+            .send()
+            .await
+        {
+            if let Ok(v) = resp.json::<serde_json::Value>().await {
+                let name = v.get("name").and_then(|x| x.as_str()).filter(|s| !s.is_empty());
+                let tag = v.get("tag_name").and_then(|x| x.as_str());
+                if let Some(n) = name.or(tag) {
+                    launcher_latest = n.to_string();
+                }
+                if let Some(u) = v.get("html_url").and_then(|x| x.as_str()) {
+                    update_url = u.to_string();
+                }
+            }
+        }
+        // Client: backend version.json.
+        if let Ok(resp) = http
+            .get(format!("{CONTENT_BASE}/celaris/version.json"))
+            .timeout(std::time::Duration::from_secs(6))
+            .send()
+            .await
+        {
+            if let Ok(v) = resp.json::<serde_json::Value>().await {
+                if let Some(ver) = v.get("version").and_then(|x| x.as_str()) {
+                    client = ver.to_string();
+                }
+            }
+        }
+    }
+
+    let update_available =
+        !launcher_latest.is_empty() && norm_ver(&launcher_latest) != norm_ver(&launcher);
+
+    VersionInfo { launcher, launcher_latest, update_available, update_url, client }
+}
+
+/// Opens a URL in the user's default browser (for the "download update" link).
+#[tauri::command]
+fn open_external(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
 /// ---------------- ENTRY ----------------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -580,6 +668,8 @@ pub fn run() {
             detect_java,
             microsoft_login,
             refresh_account,
+            version_info,
+            open_external,
             get_profiles,
             save_profiles,
             mods_dir,
@@ -591,6 +681,8 @@ pub fn run() {
             store::install_mod,
             store::list_installed_mods,
             store::remove_mod,
+            store::check_mod_updates,
+            store::update_mod,
             store::search_resourcepacks,
             store::install_resourcepack,
             store::list_resourcepacks,
@@ -629,7 +721,7 @@ pub fn run() {
             spotify::spotify_login,
             spotify::spotify_status,
             spotify::spotify_now_playing,
-            spotify::spotify_control
+            spotify::spotify_control,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");
