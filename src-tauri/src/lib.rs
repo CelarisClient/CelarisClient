@@ -354,6 +354,33 @@ fn required_java_major(mc: &str) -> u32 {
     }
 }
 
+/// Authoritative required Java major for a Minecraft version: reads
+/// `javaVersion.majorVersion` from Mojang's version JSON. Falls back to the
+/// heuristic offline.
+async fn required_java(mc_version: &str) -> u32 {
+    let fallback = required_java_major(mc_version);
+    let Ok(http) = launcher::download::client() else { return fallback; };
+    let manifest: serde_json::Value = match http
+        .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+        .timeout(std::time::Duration::from_secs(6))
+        .send().await.and_then(|r| r.error_for_status()) {
+        Ok(r) => match r.json().await { Ok(v) => v, Err(_) => return fallback },
+        Err(_) => return fallback,
+    };
+    let url = manifest.get("versions").and_then(|a| a.as_array())
+        .and_then(|a| a.iter().find(|v| v.get("id").and_then(|i| i.as_str()) == Some(mc_version)))
+        .and_then(|v| v.get("url")).and_then(|u| u.as_str());
+    let Some(url) = url else { return fallback; };
+    match http.get(url).timeout(std::time::Duration::from_secs(6)).send().await {
+        Ok(r) => match r.json::<serde_json::Value>().await {
+            Ok(vj) => vj.get("javaVersion").and_then(|j| j.get("majorVersion"))
+                .and_then(|n| n.as_u64()).map(|n| n as u32).unwrap_or(fallback),
+            Err(_) => fallback,
+        },
+        Err(_) => fallback,
+    }
+}
+
 /// Parses a Java major version out of a `-version` string ("21.0.11", "1.8.0_x").
 fn java_major_of(version: &str) -> Option<u32> {
     let v = version.trim();
@@ -485,7 +512,7 @@ async fn launch(
 
     let mut config = profile_to_config(&profile, root, game, session, mod_jars);
     // Ensure a usable Java — download a managed JRE if the system has none that fits.
-    let need = required_java_major(&profile.minecraft_version);
+    let need = required_java(&profile.minecraft_version).await;
     config.java_path = java::resolve_or_install(&app, &config.java_path, need).await;
     // Direct "join server" launch from the launcher's server list.
     config.quick_play_multiplayer = server.and_then(|s| {
