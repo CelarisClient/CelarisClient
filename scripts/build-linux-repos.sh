@@ -33,7 +33,13 @@ mkdir -p "$OUT/apt/pool" "$OUT/dnf" "$GNUPGHOME_DIR"
 chmod 700 "$GNUPGHOME_DIR"
 export GNUPGHOME="$GNUPGHOME_DIR"
 
-# --- 1. Signing key (create once) -------------------------------------------
+# --- 1. Signing key --------------------------------------------------------
+# In CI, import the key from the REPO_GPG_PRIVATE_KEY env (ascii-armored secret)
+# so packages are signed with the SAME key testers already trust.
+if [ -n "${REPO_GPG_PRIVATE_KEY:-}" ]; then
+  printf '%s' "$REPO_GPG_PRIVATE_KEY" | gpg --batch --import >/dev/null 2>&1 || true
+fi
+# Otherwise create one once (local use).
 if ! gpg --list-secret-keys "$KEYEMAIL" >/dev/null 2>&1; then
   echo "Creating repo signing key (one time)…"
   cat > "$GNUPGHOME_DIR/keygen" <<EOF
