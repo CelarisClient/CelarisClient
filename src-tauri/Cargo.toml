@@ -1,0 +1,57 @@
+[package]
+name = "celaris-launcher"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "celaris_launcher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+# Native open/save dialogs for modpack import/export.
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Launch pipeline (resolver / downloader / launcher). rustls avoids needing openssl-devel.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+futures-util = "0.3"
+sha1 = "0.10"
+hex = "0.4"
+md5 = "0.7"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Auto-provision a JRE (Adoptium tar.gz on linux/mac).
+flate2 = "1"
+tar = "0.4"
+# Auth layer + social client need timers, channels and a runtime handle.
+tokio = { version = "1", features = ["time", "sync", "rt"] }
+# Social: WebSocket client to the Celaris client-connection server (wss via rustls).
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# Install a process-wide rustls crypto provider so the raw WebSocket (wss://)
+# connect works (reqwest manages its own; tokio-tungstenite needs the default).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# Spotify: OAuth PKCE (SHA-256 challenge + random verifier).
+sha2 = "0.10"
+getrandom = "0.2"
+# Spotify callback socket: SO_REUSEADDR + accept timeout so 8888 never sticks.
+socket2 = "0.5"
+# Wardrobe: skin PNGs are sent to the UI as base64 data URLs.
+base64 = "0.22"
+# Server list: write Minecraft's servers.dat (uncompressed NBT).
+fastnbt = "2"
+tauri-plugin-autostart = "2.5.1"
+# Self-update: check the endpoint, download + install signed updates, then relaunch.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
