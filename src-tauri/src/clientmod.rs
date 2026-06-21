@@ -96,6 +96,7 @@ const PERFORMANCE_MODS: &[&str] = &[
     "ebe",          // Enhanced Block Entities
     "memoryleakfix",
     "lazydfu",
+    "simple-voice-chat", // proximity + group voice chat (works on SVC servers)
 ];
 
 #[derive(Deserialize)]
