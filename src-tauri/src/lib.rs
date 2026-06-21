@@ -501,6 +501,10 @@ async fn launch(
         if let Some(vfp) = clientmod::ensure_viafabricplus(&app, &profile.minecraft_version).await {
             mods_list.push(vfp);
         }
+        // Bundle the performance/optimisation mod suite (Sodium, Lithium, …).
+        for jar in clientmod::ensure_performance_mods(&app, &profile.minecraft_version).await {
+            mods_list.push(jar);
+        }
     }
 
     // Per-profile mod pool (each profile has its own mod list).
