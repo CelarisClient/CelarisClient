@@ -41,3 +41,4 @@ admin.json
 # Local agent/instructions notes (kept local)
 AGENTS.md
 CLAUDE.md
+linux-repo/
