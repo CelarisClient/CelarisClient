@@ -356,25 +356,43 @@ fn required_java_major(mc: &str) -> u32 {
 
 /// Authoritative required Java major for a Minecraft version: reads
 /// `javaVersion.majorVersion` from Mojang's version JSON. Falls back to the
-/// heuristic offline.
+/// heuristic offline. This is what makes any version (1.21.x, 26.x, …) pick the
+/// correct JRE instead of guessing.
 async fn required_java(mc_version: &str) -> u32 {
     let fallback = required_java_major(mc_version);
-    let Ok(http) = launcher::download::client() else { return fallback; };
+    let Ok(http) = launcher::download::client() else {
+        return fallback;
+    };
     let manifest: serde_json::Value = match http
         .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
         .timeout(std::time::Duration::from_secs(6))
-        .send().await.and_then(|r| r.error_for_status()) {
-        Ok(r) => match r.json().await { Ok(v) => v, Err(_) => return fallback },
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(r) => match r.json().await {
+            Ok(v) => v,
+            Err(_) => return fallback,
+        },
         Err(_) => return fallback,
     };
-    let url = manifest.get("versions").and_then(|a| a.as_array())
+    let url = manifest
+        .get("versions")
+        .and_then(|a| a.as_array())
         .and_then(|a| a.iter().find(|v| v.get("id").and_then(|i| i.as_str()) == Some(mc_version)))
-        .and_then(|v| v.get("url")).and_then(|u| u.as_str());
-    let Some(url) = url else { return fallback; };
+        .and_then(|v| v.get("url"))
+        .and_then(|u| u.as_str());
+    let Some(url) = url else {
+        return fallback;
+    };
     match http.get(url).timeout(std::time::Duration::from_secs(6)).send().await {
         Ok(r) => match r.json::<serde_json::Value>().await {
-            Ok(vj) => vj.get("javaVersion").and_then(|j| j.get("majorVersion"))
-                .and_then(|n| n.as_u64()).map(|n| n as u32).unwrap_or(fallback),
+            Ok(vj) => vj
+                .get("javaVersion")
+                .and_then(|j| j.get("majorVersion"))
+                .and_then(|n| n.as_u64())
+                .map(|n| n as u32)
+                .unwrap_or(fallback),
             Err(_) => fallback,
         },
         Err(_) => fallback,
@@ -743,6 +761,7 @@ pub fn run() {
             news::fetch_news,
             social::social_connect,
             social::social_send_chat,
+            social::social_send_dm,
             social::social_set_presence,
             social::social_share_screenshot,
             social::social_friend_add,

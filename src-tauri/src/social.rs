@@ -68,6 +68,7 @@ pub async fn social_connect(
                     let event = match kind {
                         "presence" => "social-presence",
                         "chat" => "social-chat",
+                        "dm" => "social-dm",
                         "screenshot" => "social-screenshot",
                         "friends" => "social-friends",
                         "friend_request" => "social-friend-request",
@@ -88,6 +89,12 @@ pub async fn social_connect(
 #[tauri::command]
 pub fn social_send_chat(text: String) -> Result<(), String> {
     send_raw(serde_json::json!({ "type": "chat", "text": text }).to_string())
+}
+
+/// Sends a private message to a single friend.
+#[tauri::command]
+pub fn social_send_dm(to: String, text: String) -> Result<(), String> {
+    send_raw(serde_json::json!({ "type": "dm", "to": to, "text": text }).to_string())
 }
 
 #[tauri::command]

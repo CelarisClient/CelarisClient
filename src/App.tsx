@@ -308,6 +308,11 @@ export default function App() {
   const [presence, setPresence] = useState<UserPresence[]>([]);
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [chatInput, setChatInput] = useState("");
+  // Private messages, keyed by the friend's username. dmTarget = open conversation
+  // (null = global chat). unreadDms = friends with new DMs while not focused.
+  const [dms, setDms] = useState<Record<string, ChatMsg[]>>({});
+  const [dmTarget, setDmTarget] = useState<string | null>(null);
+  const [unreadDms, setUnreadDms] = useState<Set<string>>(new Set());
   const [shots, setShots] = useState<SharedShot[]>([]);
   const [friends, setFriends] = useState<{ accepted: string[]; incoming: string[]; outgoing: string[] }>({
     accepted: [],
@@ -316,6 +321,7 @@ export default function App() {
   });
   const [addFriendInput, setAddFriendInput] = useState("");
   const playStartRef = useRef<number | null>(null);
+  const sessionRef = useRef<Session | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
 
@@ -409,6 +415,18 @@ export default function App() {
     const s2 = listen<{ from: string; text: string }>("social-chat", (e) =>
       setChat((c) => [...c, { from: e.payload.from, text: e.payload.text }].slice(-200))
     );
+    const sDm = listen<{ from: string; to: string; text: string }>("social-dm", (e) => {
+      const me = sessionRef.current?.username;
+      const other = e.payload.from === me ? e.payload.to : e.payload.from;
+      setDms((d) => ({ ...d, [other]: [...(d[other] ?? []), { from: e.payload.from, text: e.payload.text }].slice(-200) }));
+      if (e.payload.from !== me) {
+        setUnreadDms((u) => {
+          const n = new Set(u);
+          n.add(e.payload.from);
+          return n;
+        });
+      }
+    });
     const s3 = listen<{ message: string }>("social-system", (e) =>
       setChat((c) => [...c, { from: "", text: e.payload.message, system: true }].slice(-200))
     );
@@ -435,6 +453,7 @@ export default function App() {
       s5.then((f) => f());
       s6.then((f) => f());
       s7.then((f) => f());
+      sDm.then((f) => f());
     };
   }, []);
 
@@ -816,10 +835,24 @@ export default function App() {
     invoke("social_set_presence", { status, server: null, playtimeSecs: playtime }).catch(() => {});
   }
 
+  function openDm(name: string) {
+    setDmTarget(name);
+    setUnreadDms((u) => {
+      const n = new Set(u);
+      n.delete(name);
+      return n;
+    });
+  }
+
   async function sendChat() {
     if (!chatInput.trim()) return;
+    const text = chatInput.trim();
     try {
-      await invoke("social_send_chat", { text: chatInput.trim() });
+      if (dmTarget) {
+        await invoke("social_send_dm", { to: dmTarget, text });
+      } else {
+        await invoke("social_send_chat", { text });
+      }
       setChatInput("");
     } catch (e) {
       setChat((c) => [...c, { from: "", text: String(e), system: true }]);
@@ -1114,6 +1147,10 @@ export default function App() {
   }, [view, modsTab, active]);
 
   useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
     if (launchState === "launched") playStartRef.current = Date.now();
     reportPresence();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1128,7 +1165,16 @@ export default function App() {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chat]);
+    // Reading the open conversation clears its unread marker.
+    if (dmTarget && unreadDms.has(dmTarget)) {
+      setUnreadDms((u) => {
+        const n = new Set(u);
+        n.delete(dmTarget);
+        return n;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chat, dms, dmTarget]);
 
 
   useEffect(() => {
@@ -1805,11 +1851,12 @@ export default function App() {
                       <span className={`pres-dot ${p ? "on" : ""}`} />
                     </div>
                     <div className="presence-info">
-                      <div className="presence-name">{name}</div>
+                      <div className="presence-name">{name}{unreadDms.has(name) ? " •" : ""}</div>
                       <div className="presence-status">
                         {p ? p.status + (p.playtime_secs > 0 ? ` · ${fmtTime(p.playtime_secs)}` : "") : "offline"}
                       </div>
                     </div>
+                    <button className="iconbtn iconbtn--add" title="Nachricht" onClick={() => openDm(name)}>✉</button>
                     <button className="iconbtn iconbtn--no" title="Entfernen" onClick={() => removeFriend(name)}>✕</button>
                   </div>
                 );
@@ -1838,13 +1885,26 @@ export default function App() {
           </Card>
 
           <Card className="chat-panel">
+            <div className="chat-tabs">
+              <button className={`chat-tab ${dmTarget === null ? "on" : ""}`} onClick={() => setDmTarget(null)}>Global</button>
+              {dmTarget && (
+                <button className="chat-tab on">
+                  ✉ {dmTarget}
+                  <span className="chat-tab-x" onClick={(e) => { e.stopPropagation(); setDmTarget(null); }}>✕</span>
+                </button>
+              )}
+            </div>
             <div className="chat-log">
-              {chat.length === 0 ? (
-                <div style={{ color: "var(--text-faint)", fontSize: "0.85rem", textAlign: "center", marginTop: "var(--s5)" }}>
-                  Noch keine Nachrichten.
-                </div>
-              ) : (
-                chat.map((m, i) =>
+              {(() => {
+                const msgs = dmTarget ? (dms[dmTarget] ?? []) : chat;
+                if (msgs.length === 0) {
+                  return (
+                    <div style={{ color: "var(--text-faint)", fontSize: "0.85rem", textAlign: "center", marginTop: "var(--s5)" }}>
+                      {dmTarget ? `Noch keine Nachrichten mit ${dmTarget}.` : "Noch keine Nachrichten."}
+                    </div>
+                  );
+                }
+                return msgs.map((m, i) =>
                   m.system ? (
                     <div key={i} className="chat-system">{m.text}</div>
                   ) : (
@@ -1853,19 +1913,21 @@ export default function App() {
                       {m.text}
                     </div>
                   )
-                )
-              )}
+                );
+              })()}
               <div ref={chatEndRef} />
             </div>
             <form className="chat-input" onSubmit={(e) => { e.preventDefault(); sendChat(); }}>
               <input
                 className="input"
-                placeholder={socialConnected ? "Nachricht…" : "Nicht verbunden"}
+                placeholder={!socialConnected ? "Nicht verbunden" : dmTarget ? `Private Nachricht an ${dmTarget}…` : "Nachricht an alle…"}
                 disabled={!socialConnected}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
               />
-              <Button type="button" onClick={shareScreenshot} disabled={!socialConnected} title="Letzten Screenshot teilen">📷</Button>
+              {!dmTarget && (
+                <Button type="button" onClick={shareScreenshot} disabled={!socialConnected} title="Letzten Screenshot teilen">📷</Button>
+              )}
               <PrimaryButton type="submit" disabled={!socialConnected}>Senden</PrimaryButton>
             </form>
           </Card>

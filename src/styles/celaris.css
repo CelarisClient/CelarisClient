@@ -1282,6 +1282,16 @@ body {
 .iconbtn--add:hover { background: var(--accent-soft); color: var(--accent); border-color: rgba(157,92,255,0.4); }
 
 .chat-panel { display: flex; flex-direction: column; height: 520px; padding: 0; overflow: hidden; }
+.chat-tabs { display: flex; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--border-soft); background: var(--bg-2); }
+.chat-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 0.3rem 0.7rem; border-radius: 999px;
+  border: 1px solid var(--border-soft); background: transparent;
+  color: var(--text-dim, #b9c0d4); font-size: 0.8rem; font-weight: 600; cursor: pointer;
+}
+.chat-tab.on { border-color: var(--accent); color: var(--text); background: var(--accent-soft, rgba(157,92,255,0.15)); }
+.chat-tab-x { opacity: 0.7; padding-left: 2px; }
+.chat-tab-x:hover { opacity: 1; }
 .chat-log { flex: 1; overflow-y: auto; padding: var(--s4); display: flex; flex-direction: column; gap: 6px; }
 .chat-msg { font-size: 0.9rem; color: var(--text-dim); line-height: 1.4; }
 .chat-from { font-weight: 600; color: var(--accent); margin-right: 6px; }
