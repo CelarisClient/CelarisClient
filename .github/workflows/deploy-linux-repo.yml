@@ -1,0 +1,62 @@
+name: Deploy Linux apt/dnf repo
+
+# Builds the .deb/.rpm, generates the signed apt + dnf repositories and uploads
+# them to the server via SFTP, so Linux testers get updates in their software
+# centre. Manual trigger.
+#
+# Required repository secrets:
+#   REPO_GPG_PRIVATE_KEY   ascii-armored GPG private key that signs the repos
+#   TAURI_SIGNING_PRIVATE_KEY  (already set) Tauri updater signing key
+#   SFTP_HOST, SFTP_PORT, SFTP_USERNAME, SFTP_PASSWORD   Pterodactyl SFTP access
+#
+# The SFTP root is the server's /home/container, so the repos land in
+# content/apt and content/dnf (served at https://api.celarisclient.de/content/…).
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build + repo tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+                                  createrepo-c dpkg-dev lftp gnupg
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build .deb and .rpm
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: npm run tauri build --  --bundles deb,rpm
+
+      - name: Build signed apt + dnf repositories
+        env:
+          REPO_GPG_PRIVATE_KEY: ${{ secrets.REPO_GPG_PRIVATE_KEY }}
+        run: bash scripts/build-linux-repos.sh
+
+      - name: Upload to server (SFTP)
+        env:
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_PORT: ${{ secrets.SFTP_PORT }}
+          SFTP_USERNAME: ${{ secrets.SFTP_USERNAME }}
+          SFTP_PASSWORD: ${{ secrets.SFTP_PASSWORD }}
+        run: |
+          lftp -u "$SFTP_USERNAME,$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e "
+            set sftp:auto-confirm yes;
+            set net:max-retries 2;
+            mkdir -p content/apt;
+            mkdir -p content/dnf;
+            mirror -R --delete --verbose linux-repo/apt content/apt;
+            mirror -R --delete --verbose linux-repo/dnf content/dnf;
+            put linux-repo/celaris.asc -o content/celaris.asc;
+            bye"
