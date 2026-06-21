@@ -19,8 +19,11 @@ const DEFAULTS: SoundSettings = {
   outputDeviceId: "",
 };
 
-// Fixed lofi playlist — drop these files into celaris-launcher/public/.
-const PLAYLIST = ["/lofi1.mp3", "/lofi2.mp3", "/lofi3.mp3", "/lofi4.mp3", "/lofi5.mp3"];
+// Fixed lofi playlist. OGG/Vorbis (not MP3): WebKitGTK on Linux plays OGG with
+// the always-present GStreamer base plugins, whereas MP3 needs the "ugly"/libav
+// plugins that are often missing → silent music on Linux. OGG also plays on
+// Windows/macOS.
+const PLAYLIST = ["/lofi1.ogg", "/lofi2.ogg", "/lofi3.ogg", "/lofi4.ogg", "/lofi5.ogg"];
 
 const KEY = "celaris-sound";
 

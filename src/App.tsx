@@ -1863,25 +1863,8 @@ export default function App() {
               })
             )}
 
-            {presence.filter((u) => u.username !== playerName && !friends.accepted.includes(u.username)).length > 0 && (
-              <>
-                <div className="nav-label" style={{ padding: "var(--s4) 0 var(--s2)" }}>Online</div>
-                {presence
-                  .filter((u) => u.username !== playerName && !friends.accepted.includes(u.username))
-                  .map((u, i) => (
-                    <div key={`on${i}`} className="presence-row">
-                      <div className="presence-avatar">{u.username.charAt(0).toUpperCase()}</div>
-                      <div className="presence-info">
-                        <div className="presence-name">{u.username}</div>
-                        <div className="presence-status">{u.status}</div>
-                      </div>
-                      {!friends.outgoing.includes(u.username) && (
-                        <button className="iconbtn iconbtn--add" title="Freund hinzufügen" onClick={() => addFriend(u.username)}>+</button>
-                      )}
-                    </div>
-                  ))}
-              </>
-            )}
+            {/* No global "all online users" list — for privacy you add friends by
+                name (above). Only friends' presence is shown. */}
           </Card>
 
           <Card className="chat-panel">
