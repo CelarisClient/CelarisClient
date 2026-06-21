@@ -42,7 +42,7 @@
     "targets": "all",
     "category": "Game",
     "shortDescription": "Celaris – Minecraft Client & Launcher",
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -53,8 +53,10 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": ["https://api.celarisclient.de/content/launcher/latest.json"],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVCNTc2NjAxMjIxQjU5MTMKUldRVFdSc2lBV1pYVytreGVyWk5kdWZnRXozclV1aVY3TVZmcTc2cWIwdXphcldHYzMzeWdnYVEK"
+      "endpoints": [
+        "https://api.celarisclient.de/content/launcher/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFNDBCMDVDMEU0RTNGNTYKUldSV1AwNE9YTEJBWGt5b3poelkzUzR4UEE5bHh5bTM5bGFvUUxBSTNSelRyZ25FcytMeFJJdzkK"
     }
   }
 }
