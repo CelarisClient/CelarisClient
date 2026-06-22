@@ -1,4 +1,7 @@
+#[cfg(feature = "admin")]
+mod admin;
 mod clientmod;
+mod coins;
 mod java;
 mod launcher;
 mod news;
@@ -9,7 +12,7 @@ mod skins;
 mod spotify;
 mod store;
 
-/// Base URL for remotely managed remote content (partner servers, global modpacks,
+/// Base URL for admin-managed remote content (partner servers, global modpacks,
 /// announcements). Served over HTTP as JSON — the launcher NEVER talks to a DB
 /// directly. Replace with your own hosting once available.
 pub(crate) const CONTENT_BASE: &str = "https://api.celarisclient.de/content";
@@ -127,6 +130,7 @@ fn detect_java() -> Vec<JavaInstall> {
 fn java_version(java: &Path) -> Option<String> {
     let mut cmd = Command::new(java);
     cmd.arg("-version");
+    // No console flash on Windows for the version probe.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -726,6 +730,11 @@ pub fn run() {
             refresh_account,
             version_info,
             open_external,
+            coins::coins_packages,
+            coins::coins_balance,
+            coins::coins_checkout,
+            coins::coins_capture,
+            coins::coins_transfer,
             get_profiles,
             save_profiles,
             mods_dir,
@@ -779,6 +788,14 @@ pub fn run() {
             spotify::spotify_status,
             spotify::spotify_now_playing,
             spotify::spotify_control,
+            #[cfg(feature = "admin")]
+            admin::admin_set_token,
+            #[cfg(feature = "admin")]
+            admin::admin_has_token,
+            #[cfg(feature = "admin")]
+            admin::admin_grant,
+            #[cfg(feature = "admin")]
+            admin::admin_upload
         ])
         .run(tauri::generate_context!())
         .expect("failed to run app");

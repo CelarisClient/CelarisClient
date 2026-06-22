@@ -1,4 +1,4 @@
-//! Server list: partner servers (remotely managed, fetched over HTTP, pinned on top)
+//! Server list: partner servers (admin-managed, fetched over HTTP, pinned on top)
 //! + the user's own servers, written into Minecraft's `servers.dat` so they show
 //! up in-game. The launcher only ever fetches HTTP/JSON, never a database.
 
@@ -33,7 +33,7 @@ fn servers_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("servers.json"))
 }
 
-/// Best-effort fetch of partner servers from the content host. Returns an
+/// Best-effort fetch of partner servers from the admin content host. Returns an
 /// empty list (not an error) when unreachable so the UI degrades gracefully.
 async fn fetch_partners() -> Vec<ServerEntry> {
     let client = match download::client() {

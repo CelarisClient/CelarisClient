@@ -3,6 +3,7 @@ import { getSound, saveSound, applyMusic, unlockAudio, loadSound, enumerateOutpu
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { invoke } from "@tauri-apps/api/core";
+import AdminPanel, { ADMIN_ENABLED } from "@adminpanel";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -120,6 +121,7 @@ type View =
   | "mods"
   | "servers"
   | "hosting"
+  | "coins"
   | "cosmetics"
   | "wardrobe"
   | "resourcepacks"
@@ -127,6 +129,7 @@ type View =
   | "logs"
   | "credits"
   | "settings"
+  | "admin"
   | "launcher";
 type LaunchState = "idle" | "running" | "launched" | "error";
 
@@ -283,6 +286,15 @@ export default function App() {
     update_url: string;
     client: string;
   }>({ launcher: "", launcher_latest: "", update_available: false, update_url: "", client: "" });
+  // Coins shop
+  type CoinPkg = { id: string; eur_cents: number; coins: number; name: string };
+  const [coinBal, setCoinBal] = useState<number | null>(null);
+  const [coinPkgs, setCoinPkgs] = useState<CoinPkg[]>([]);
+  const [pendingOrder, setPendingOrder] = useState<string | null>(null);
+  const [coinBusy, setCoinBusy] = useState(false);
+  const [coinMsg, setCoinMsg] = useState("");
+  const [giftTo, setGiftTo] = useState("");
+  const [giftAmt, setGiftAmt] = useState("");
   const [showSnapshots, setShowSnapshots] = useState(false);
 
   const [skins, setSkins] = useState<SkinInfo[]>([]);
@@ -358,13 +370,34 @@ export default function App() {
       try {
         const update = await checkUpdate();
         if (update) {
+          let got = 0;
+          let total = 0;
           setUpdateMsg(`Update ${update.version} wird geladen…`);
-          await update.downloadAndInstall();
+          // downloadAndInstall reports progress; surface it so a stalled/failed
+          // download is visible instead of a frozen "wird geladen…".
+          await update.downloadAndInstall((ev) => {
+            if (ev.event === "Started") {
+              total = ev.data.contentLength ?? 0;
+            } else if (ev.event === "Progress") {
+              got += ev.data.chunkLength ?? 0;
+              const pct = total > 0 ? Math.round((got / total) * 100) : 0;
+              setUpdateMsg(`Update ${update.version} wird geladen… ${pct}%`);
+            } else if (ev.event === "Finished") {
+              setUpdateMsg(`Update ${update.version} wird installiert…`);
+            }
+          });
           setUpdateMsg("Update installiert — Neustart…");
           await relaunch();
         }
-      } catch {
-        /* offline / no update published yet — ignore */
+      } catch (e) {
+        // Show the real reason (404 latest.json, bad signature, etc.) instead of
+        // silently swallowing it — a stuck "wird geladen…" hides the failure.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg && !/network|offline|fetch|connect|dns/i.test(msg)) {
+          setUpdateMsg(`Update fehlgeschlagen: ${msg}`);
+        } else {
+          setUpdateMsg(null);
+        }
       }
     })();
   }, []);
@@ -827,6 +860,94 @@ export default function App() {
   }
 
 
+  async function loadCoins() {
+    try {
+      setCoinPkgs(await invoke<CoinPkg[]>("coins_packages"));
+    } catch {
+      /* ignore */
+    }
+    if (!session?.access_token) {
+      setCoinBal(null);
+      return;
+    }
+    try {
+      setCoinBal(await invoke<number>("coins_balance", { accessToken: session.access_token, username: session.username }));
+    } catch {
+      setCoinBal(null);
+    }
+  }
+
+  async function buyPackage(id: string) {
+    if (!session?.access_token) {
+      setCoinMsg("Microsoft-Login nötig, um Coins zu kaufen.");
+      return;
+    }
+    setCoinBusy(true);
+    setCoinMsg("");
+    try {
+      const res = await invoke<{ url: string; order_id: string }>("coins_checkout", {
+        accessToken: session.access_token,
+        username: session.username,
+        package: id,
+      });
+      await invoke("open_external", { url: res.url }).catch(() => {});
+      setPendingOrder(res.order_id);
+      setCoinMsg("Schließe die Zahlung im Browser ab, dann auf „Bezahlung bestätigen“ klicken.");
+    } catch (e) {
+      setCoinMsg(`Fehler: ${String(e)}`);
+    } finally {
+      setCoinBusy(false);
+    }
+  }
+
+  async function confirmPayment() {
+    if (!session?.access_token || !pendingOrder) return;
+    setCoinBusy(true);
+    try {
+      const res = await invoke<{ paid: boolean; coins: number }>("coins_capture", {
+        accessToken: session.access_token,
+        username: session.username,
+        orderId: pendingOrder,
+      });
+      if (res.paid) {
+        setCoinBal(res.coins);
+        setPendingOrder(null);
+        setCoinMsg("✓ Zahlung bestätigt — Coins gutgeschrieben!");
+      } else {
+        setCoinMsg("Noch nicht bezahlt — schließe die PayPal-Zahlung zuerst ab.");
+      }
+    } catch (e) {
+      setCoinMsg(`Fehler: ${String(e)}`);
+    } finally {
+      setCoinBusy(false);
+    }
+  }
+
+  async function giftCoins() {
+    const amt = parseInt(giftAmt, 10);
+    if (!session?.access_token || !giftTo.trim() || !amt || amt <= 0) {
+      setCoinMsg("Empfänger + gültigen Betrag angeben.");
+      return;
+    }
+    setCoinBusy(true);
+    try {
+      const res = await invoke<{ ok: boolean; coins: number }>("coins_transfer", {
+        accessToken: session.access_token,
+        username: session.username,
+        to: giftTo.trim(),
+        amount: amt,
+      });
+      setCoinBal(res.coins);
+      setGiftTo("");
+      setGiftAmt("");
+      setCoinMsg("✓ Coins gesendet!");
+    } catch (e) {
+      setCoinMsg(`Fehler: ${String(e)}`);
+    } finally {
+      setCoinBusy(false);
+    }
+  }
+
   function reportPresence() {
     if (!socialConnected) return;
     const inGame = launchState === "launched";
@@ -1114,6 +1235,7 @@ export default function App() {
 
   useEffect(() => {
     if (view === "mods") { loadInstalled(); searchMods(0); }
+    if (view === "coins") { setCoinMsg(""); loadCoins(); }
     if (view === "wardrobe") loadWardrobe();
     if (view === "servers") loadServers();
     if (view === "news") loadNews();
@@ -1234,6 +1356,7 @@ export default function App() {
         />
         <SidebarItem icon={<ServerIcon />} label="Server" active={view === "servers"} onClick={() => setView("servers")} />
         <SidebarItem icon={<HostingIcon />} label="Hosting" active={view === "hosting"} onClick={() => setView("hosting")} />
+        <SidebarItem icon={<CosmeticsIcon />} label="Coins" active={view === "coins"} onClick={() => setView("coins")} />
         <SidebarItem icon={<CosmeticsIcon />} label="Cosmetics" active={view === "cosmetics"} onClick={() => setView("cosmetics")} />
         <SidebarItem icon={<WardrobeIcon />} label="Garderobe" active={view === "wardrobe"} onClick={() => setView("wardrobe")} />
         <SidebarItem
@@ -1249,6 +1372,9 @@ export default function App() {
         />
         <SidebarItem icon={<SettingsIcon />} label="Launcher" active={view === "launcher"} onClick={() => setView("launcher")} />
         <SidebarItem icon={<CreditsIcon />} label="Credits" active={view === "credits"} onClick={() => setView("credits")} />
+        {ADMIN_ENABLED && (
+          <SidebarItem icon={<SettingsIcon />} label="Admin" active={view === "admin"} onClick={() => setView("admin")} />
+        )}
 
         <div className="sidebar-spacer" />
         <div className="sidebar-foot">
@@ -1344,12 +1470,14 @@ export default function App() {
         {view === "mods" && renderMods()}
         {view === "servers" && renderServers()}
         {view === "hosting" && renderHosting()}
+        {view === "coins" && renderCoins()}
         {view === "cosmetics" && renderCosmetics()}
         {view === "credits" && renderCredits()}
         {view === "logs" && renderLogs()}
         {(view === "resourcepacks" || view === "shaders") && renderPackMarket()}
         {view === "wardrobe" && renderWardrobe()}
         {view === "settings" && renderSettings()}
+        {view === "admin" && ADMIN_ENABLED && <AdminPanel />}
         {view === "launcher" && renderLauncher()}
       </main>
       </div>
@@ -2032,6 +2160,59 @@ export default function App() {
             </div>
           </div>
         )}
+      </div>
+    );
+  }
+
+  function renderCoins() {
+    const eur = (c: number) => (c / 100).toFixed(2).replace(".", ",") + " €";
+    return (
+      <div className="view">
+        <div className="view-head">
+          <div>
+            <h2 className="view-title">Celaris Coins</h2>
+            <div className="view-sub">Coins kaufen, an Freunde verschenken · an deinen Microsoft-Account gebunden</div>
+          </div>
+          <span className="chip"><span className="chip-key">Guthaben</span><strong>{coinBal == null ? "—" : `${coinBal} ⛁`}</strong></span>
+        </div>
+
+        {!session?.access_token && (
+          <Card><div style={{ padding: "var(--s4)", color: "var(--text-faint)" }}>Melde dich mit einem <b>Microsoft-Account</b> an, um Coins zu kaufen und zu nutzen.</div></Card>
+        )}
+
+        <div className="nav-label" style={{ padding: "var(--s4) 0 var(--s2)" }}>Coins kaufen (PayPal)</div>
+        <div className="grid grid--cards stagger">
+          {coinPkgs.map((p) => (
+            <Card key={p.id} className="modcard">
+              <div className="modcard-title">{p.name}</div>
+              <div className="modcard-author">{p.coins} ⛁ für {eur(p.eur_cents)}</div>
+              <div className="modcard-foot">
+                <PrimaryButton disabled={coinBusy || !session?.access_token} onClick={() => buyPackage(p.id)}>Kaufen</PrimaryButton>
+              </div>
+            </Card>
+          ))}
+        </div>
+
+        {pendingOrder && (
+          <Card>
+            <div style={{ padding: "var(--s4)", display: "flex", gap: "var(--s3)", alignItems: "center", flexWrap: "wrap" }}>
+              <span>Zahlung im Browser abgeschlossen?</span>
+              <PrimaryButton disabled={coinBusy} onClick={confirmPayment}>Bezahlung bestätigen</PrimaryButton>
+              <Button className="btn--ghost" disabled={coinBusy} onClick={() => { setPendingOrder(null); setCoinMsg(""); }}>Abbrechen</Button>
+            </div>
+          </Card>
+        )}
+
+        <div className="nav-label" style={{ padding: "var(--s5) 0 var(--s2)" }}>Coins verschenken</div>
+        <Card>
+          <div style={{ padding: "var(--s4)", display: "flex", gap: "var(--s2)", flexWrap: "wrap" }}>
+            <input className="input" placeholder="Empfänger (Minecraft-Name)" value={giftTo} onChange={(e) => setGiftTo(e.target.value)} disabled={!session?.access_token} />
+            <input className="input" style={{ maxWidth: 140 }} type="number" placeholder="Anzahl" value={giftAmt} onChange={(e) => setGiftAmt(e.target.value)} disabled={!session?.access_token} />
+            <PrimaryButton disabled={coinBusy || !session?.access_token} onClick={giftCoins}>Senden</PrimaryButton>
+          </div>
+        </Card>
+
+        {coinMsg && <div style={{ marginTop: "var(--s3)", color: "var(--text)" }}>{coinMsg}</div>}
       </div>
     );
   }

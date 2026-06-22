@@ -1,5 +1,5 @@
 //! Newspaper feed: official Minecraft patch notes (Mojang launcher content) plus
-//! remotely managed Celaris announcements / changelog from `<CONTENT_BASE>/news.json`.
+//! admin-managed Celaris announcements / changelog from `<CONTENT_BASE>/news.json`.
 
 use std::time::Duration;
 
@@ -59,7 +59,7 @@ struct McContent {
     body: String,
 }
 
-// --- Celaris announcements (remotely managed) ---
+// --- Celaris announcements (admin-managed) ---
 #[derive(Deserialize)]
 struct CelarisNews {
     title: String,

@@ -376,7 +376,7 @@ fn add_jars(dir: &Path, jars: &mut Vec<PathBuf>, seen: &mut HashSet<String>) {
 }
 
 // ---------------------------------------------------------------------------
-// Global modpacks (curated, available to everyone)
+// Global modpacks (admin-curated, available to everyone)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
