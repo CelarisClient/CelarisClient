@@ -53,8 +53,9 @@ pub async fn coins_balance(access_token: String, username: String) -> Result<i64
     Ok(v["coins"].as_i64().unwrap_or(0))
 }
 
-/// Starts a PayPal purchase; returns `{ url, order_id }`. The launcher opens the
-/// url, the user approves, then calls `coins_capture` with the order_id.
+/// Starts a Lemon Squeezy purchase; returns `{ url }`. The launcher opens the url,
+/// the user pays, and Lemon Squeezy's signed webhook credits the coins server-side.
+/// The launcher just re-reads the balance afterwards (`coins_balance`).
 #[tauri::command]
 pub async fn coins_checkout(access_token: String, username: String, package: String) -> Result<Value, String> {
     let http = download::client().map_err(|e| e.to_string())?;
@@ -63,24 +64,6 @@ pub async fn coins_checkout(access_token: String, username: String, package: Str
         .post(format!("{API}/api/coins/checkout"))
         .bearer_auth(tok)
         .json(&serde_json::json!({ "username": username, "package": package }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(resp.text().await.unwrap_or_else(|_| "Fehler".into()));
-    }
-    resp.json().await.map_err(|e| e.to_string())
-}
-
-/// Captures an approved order and credits coins; returns `{ paid, coins }`.
-#[tauri::command]
-pub async fn coins_capture(access_token: String, username: String, order_id: String) -> Result<Value, String> {
-    let http = download::client().map_err(|e| e.to_string())?;
-    let tok = session_token(&http, &access_token).await?;
-    let resp = http
-        .post(format!("{API}/api/coins/capture"))
-        .bearer_auth(tok)
-        .json(&serde_json::json!({ "username": username, "order_id": order_id }))
         .send()
         .await
         .map_err(|e| e.to_string())?;

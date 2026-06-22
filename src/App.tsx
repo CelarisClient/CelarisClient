@@ -290,7 +290,7 @@ export default function App() {
   type CoinPkg = { id: string; eur_cents: number; coins: number; name: string };
   const [coinBal, setCoinBal] = useState<number | null>(null);
   const [coinPkgs, setCoinPkgs] = useState<CoinPkg[]>([]);
-  const [pendingOrder, setPendingOrder] = useState<string | null>(null);
+  const [pendingOrder, setPendingOrder] = useState<boolean>(false);
   const [coinBusy, setCoinBusy] = useState(false);
   const [coinMsg, setCoinMsg] = useState("");
   const [giftTo, setGiftTo] = useState("");
@@ -885,14 +885,14 @@ export default function App() {
     setCoinBusy(true);
     setCoinMsg("");
     try {
-      const res = await invoke<{ url: string; order_id: string }>("coins_checkout", {
+      const res = await invoke<{ url: string }>("coins_checkout", {
         accessToken: session.access_token,
         username: session.username,
         package: id,
       });
       await invoke("open_external", { url: res.url }).catch(() => {});
-      setPendingOrder(res.order_id);
-      setCoinMsg("Schließe die Zahlung im Browser ab, dann auf „Bezahlung bestätigen“ klicken.");
+      setPendingOrder(true);
+      setCoinMsg("Schließe die Zahlung im Browser ab. Die Coins werden automatisch gutgeschrieben — klicke danach auf „Guthaben aktualisieren“.");
     } catch (e) {
       setCoinMsg(`Fehler: ${String(e)}`);
     } finally {
@@ -900,21 +900,32 @@ export default function App() {
     }
   }
 
+  // After paying, coins are credited server-side by Lemon Squeezy's webhook;
+  // re-read the balance to reflect it (retry briefly in case the webhook is a
+  // moment behind).
   async function confirmPayment() {
-    if (!session?.access_token || !pendingOrder) return;
+    if (!session?.access_token) return;
     setCoinBusy(true);
     try {
-      const res = await invoke<{ paid: boolean; coins: number }>("coins_capture", {
-        accessToken: session.access_token,
-        username: session.username,
-        orderId: pendingOrder,
-      });
-      if (res.paid) {
-        setCoinBal(res.coins);
-        setPendingOrder(null);
-        setCoinMsg("✓ Zahlung bestätigt — Coins gutgeschrieben!");
+      const before = coinBal ?? 0;
+      let credited = false;
+      for (let i = 0; i < 5; i++) {
+        const bal = await invoke<number>("coins_balance", {
+          accessToken: session.access_token,
+          username: session.username,
+        });
+        setCoinBal(bal);
+        if (bal > before) {
+          credited = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      if (credited) {
+        setPendingOrder(false);
+        setCoinMsg("✓ Coins gutgeschrieben!");
       } else {
-        setCoinMsg("Noch nicht bezahlt — schließe die PayPal-Zahlung zuerst ab.");
+        setCoinMsg("Noch keine Gutschrift sichtbar. Falls du gerade erst bezahlt hast, warte kurz und aktualisiere erneut.");
       }
     } catch (e) {
       setCoinMsg(`Fehler: ${String(e)}`);
@@ -2197,8 +2208,8 @@ export default function App() {
           <Card>
             <div style={{ padding: "var(--s4)", display: "flex", gap: "var(--s3)", alignItems: "center", flexWrap: "wrap" }}>
               <span>Zahlung im Browser abgeschlossen?</span>
-              <PrimaryButton disabled={coinBusy} onClick={confirmPayment}>Bezahlung bestätigen</PrimaryButton>
-              <Button className="btn--ghost" disabled={coinBusy} onClick={() => { setPendingOrder(null); setCoinMsg(""); }}>Abbrechen</Button>
+              <PrimaryButton disabled={coinBusy} onClick={confirmPayment}>Guthaben aktualisieren</PrimaryButton>
+              <Button className="btn--ghost" disabled={coinBusy} onClick={() => { setPendingOrder(false); setCoinMsg(""); }}>Schließen</Button>
             </div>
           </Card>
         )}

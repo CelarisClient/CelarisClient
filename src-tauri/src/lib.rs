@@ -733,7 +733,6 @@ pub fn run() {
             coins::coins_packages,
             coins::coins_balance,
             coins::coins_checkout,
-            coins::coins_capture,
             coins::coins_transfer,
             get_profiles,
             save_profiles,
