@@ -147,6 +147,9 @@ const DEFAULT_PROFILE: Profile = {
 
 /** Celaris Discord invite. */
 const DISCORD_INVITE = "https://discord.gg/62RTMCVjQ4";
+/** Branded download page — fallback whenever the built-in auto-update can't
+ *  self-replace (rpm/Flatpak/portable, or any failed in-place update). */
+const DOWNLOAD_URL = "https://www.celarisclient.de/download";
 
 /** Selectable themes — each swaps the accent palette AND the background.
    `video` (optional) = animated background; `space` = star/planet effects. */
@@ -250,6 +253,9 @@ export default function App() {
   const [sound, setSound] = useState(() => loadSound());
   const [audioOutputs, setAudioOutputs] = useState<{ deviceId: string; label: string }[]>([]);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+  // When true, the update toast becomes a button that opens the download page
+  // (auto-update wasn't possible — e.g. rpm/Flatpak/portable installs).
+  const [updateCta, setUpdateCta] = useState(false);
   const [theme, setTheme] = useState<string>(() => localStorage.getItem("celaris-theme") ?? "celaris");
   const [loginBusy, setLoginBusy] = useState(false);
   const [deviceCode, setDeviceCode] = useState<DeviceCode | null>(null);
@@ -390,11 +396,13 @@ export default function App() {
           await relaunch();
         }
       } catch (e) {
-        // Show the real reason (404 latest.json, bad signature, etc.) instead of
-        // silently swallowing it — a stuck "wird geladen…" hides the failure.
+        // Some install types (rpm, Flatpak, portable/AppImage without write
+        // access, …) can't self-replace — `downloadAndInstall` throws. Instead of
+        // a dead-end "fehlgeschlagen", point the user at the download page.
         const msg = e instanceof Error ? e.message : String(e);
         if (msg && !/network|offline|fetch|connect|dns/i.test(msg)) {
-          setUpdateMsg(`Update fehlgeschlagen: ${msg}`);
+          setUpdateMsg("Auto-Update nicht möglich – hier neueste Version laden");
+          setUpdateCta(true);
         } else {
           setUpdateMsg(null);
         }
@@ -1333,7 +1341,18 @@ export default function App() {
           space={!!THEMES.find((t) => t.key === theme)?.space}
         />
       )}
-      {updateMsg && <div className="update-toast">{updateMsg}</div>}
+      {updateMsg &&
+        (updateCta ? (
+          <button
+            className="update-toast update-toast-cta"
+            title="Zur Downloadseite"
+            onClick={() => openUrl(DOWNLOAD_URL)}
+          >
+            {updateMsg} ↗
+          </button>
+        ) : (
+          <div className="update-toast">{updateMsg}</div>
+        ))}
       <div className="app-shell">
         <TitleBar />
 
@@ -1400,7 +1419,7 @@ export default function App() {
           <button
             className="update-pill"
             title="Launcher-Update herunterladen"
-            onClick={() => invoke("open_external", { url: appVersions.update_url }).catch(() => {})}
+            onClick={() => openUrl(DOWNLOAD_URL)}
           >
             ↑ Update verfügbar: {appVersions.launcher_latest} — Download
           </button>
