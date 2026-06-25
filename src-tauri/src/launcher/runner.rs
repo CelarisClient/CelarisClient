@@ -452,6 +452,14 @@ fn build_command(config: &CelarisLaunchConfig, plan: &LaunchPlan) -> Vec<String>
         vec![config.java_path.clone(), format!("-Xmx{}M", config.max_ram_mb)];
     args.extend(config.extra_jvm_args.iter().cloned());
 
+    // Point the JVM AND LWJGL at our extracted natives dir on EVERY platform and
+    // version. MC 26.x dropped -Djava.library.path from its jvm args, and Sodium's
+    // early graphics probe loads lwjgl.dll/liblwjgl.so at preLaunch — without these
+    // the client crashes with "Failed to locate library: lwjgl.dll" on Windows.
+    let natives = plan.natives_dir.to_string_lossy().to_string();
+    args.push(format!("-Dorg.lwjgl.librarypath={natives}"));
+    args.push(format!("-Djava.library.path={natives}"));
+
     match &plan.version.arguments {
         Some(arguments) => {
             for token in resolver::collect_args(&arguments.jvm) {
